@@ -1,0 +1,389 @@
+Server :
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <iostream>
+#include <fstream>
+#include <thread>
+#include <chrono>
+#include <sstream>
+#include <vector>
+#include <sys/wait.h>
+
+using namespace std;
+
+void convertSockaddrStorageToSockaddr(const struct sockaddr_storage *from,
+                                      struct sockaddr *to) {
+    // Check the address family to determine the type
+    if (from->ss_family == AF_INET) {
+        // IPv4 case
+        const struct sockaddr_in *from_in = (const struct sockaddr_in *)from;
+        struct sockaddr_in *to_in = (struct sockaddr_in *)to;
+
+        // Copy the entire structure
+        memcpy(to_in, from_in, sizeof(struct sockaddr_in));
+    } else if (from->ss_family == AF_INET6) {
+        // IPv6 case
+        const struct sockaddr_in6 *from_in6 = (const struct sockaddr_in6 *)from;
+        struct sockaddr_in6 *to_in6 = (struct sockaddr_in6 *)to;
+
+        // Copy the entire structure
+        memcpy(to_in6, from_in6, sizeof(struct sockaddr_in6));
+    } else {
+        // Handle other address families if necessary
+        fprintf(stderr, "Unsupported address family: %d\n", from->ss_family);
+    }
+}
+
+void DieWithUserMessage(const char *msg, const char *detail){
+    fputs(msg, stderr);
+    fputs(": ", stderr);
+    fputs(detail, stderr);
+    fputc('\n', stderr);
+    exit(1);
+}
+void DieWithSystemMessage(const char *msg) {
+    perror(msg);
+    exit(1);
+}
+struct ack_packet {
+    uint16_t chsum;
+    uint16_t len;
+    uint16_t ackno;
+};
+struct packet {
+    uint16_t chsum;
+    uint16_t len;
+    uint16_t seqno;
+    uint16_t finished;
+    char data[500];
+};
+
+int main(int argc, char *argv[]) {
+
+    if (argc != 2) // Test for correct number of arguments
+        DieWithUserMessage("Parameter(s)",
+                           "<Server Address/Name> <Input File Address>");
+
+    const char* inputFileName = argv[1];
+    std::ifstream inputFile(inputFileName);
+    if (!inputFile.is_open()) {
+        DieWithUserMessage("Wrong File",
+                           "FIle Doesn't Exist");
+    }
+    char line1[256];
+    inputFile.getline(line1, sizeof(line1));
+    // Construct the server address structure
+    struct addrinfo addrCriteria; // Criteria for address
+    memset(&addrCriteria, 0, sizeof(addrCriteria)); // Zero out structure
+    addrCriteria.ai_family = AF_INET; // Any address family
+    addrCriteria.ai_flags = AI_PASSIVE; // Accept on any address/port
+    addrCriteria.ai_socktype = SOCK_DGRAM; // Only datagram socket
+    addrCriteria.ai_protocol = IPPROTO_UDP; // Only UDP socket
+
+    struct addrinfo *servAddr; // List of server addresses
+    int rtnVal = getaddrinfo(NULL, line1, &addrCriteria, &servAddr);
+    if (rtnVal != 0)
+        DieWithUserMessage("getaddrinfo() failed", gai_strerror(rtnVal));
+    // Create socket for incoming connections
+    int sock = socket(AF_INET, SOCK_DGRAM,
+                      IPPROTO_UDP);
+    if (sock < 0)
+        DieWithSystemMessage("socket() failed");
+
+    if (bind(sock, servAddr->ai_addr, servAddr->ai_addrlen) < 0)
+        DieWithSystemMessage("bind() failed");
+
+    freeaddrinfo(servAddr);
+
+    for (;;) {
+        struct sockaddr clntAddr;
+        socklen_t clntAddrLen;
+        char buffer[508];
+        ssize_t numBytesRcvd = recvfrom(sock, buffer, 6, 0,
+                                        &clntAddr, &clntAddrLen);
+        std::istringstream iss(buffer);
+        std::string address;
+        iss >> address;
+        if (numBytesRcvd < 0)
+            DieWithSystemMessage("recvfrom() failed");
+        pid_t pid = fork();
+        if (pid == -1) {
+            DieWithSystemMessage("fork() failed");
+        } else if (pid == 0) {
+
+            /** We're now in a whole new process,
+             * let's open a socket for it and use
+             * the address of the client saved in
+             * addressOfClient sockaddr in the child
+             * Client doesn't need a new socket at all,
+             * it will just keep on listening on his socket
+             * regardless who's sending.
+             * You may ask why are we binding sockets to ports
+             * here and not in client, actually we don't have to
+             * bind here in child, we'll just send to the waiting client
+             * and he'll get to know our address form the receive_from he's
+             * using.
+             * In parent server we must have bind to some socket
+             * so that the client could have something fixed to send
+             * the first request to.
+             * */
+            int newSock = socket(AF_INET, SOCK_DGRAM,
+                              0);
+            if (newSock < 0)
+                DieWithSystemMessage("socket() failed");
+
+            /**
+             * Reading the file*/
+            ifstream file(address, ios::binary);
+            if (!file) {
+                cerr << "Error opening file." << endl;
+                return 1;
+            }
+            file.seekg(0, ios::end);
+            streampos fileSize = file.tellg();
+            file.seekg(0, ios::beg);
+            cout << fileSize << endl;
+            vector<char> fileContent(fileSize);
+            file.read(fileContent.data(), fileSize);
+
+            /**
+             * Sending the file to the client saved in
+             * the black pearl address addressOfClientBlackPearl
+             * */
+            struct timeval timeout;
+            timeout.tv_sec = 5;  // 5 seconds timeout (adjust as needed)
+            timeout.tv_usec = 0;
+            setsockopt(newSock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+            const size_t chunkSize = 500;
+            for (uint16_t seqno = 0; seqno < fileSize / chunkSize; ++seqno) {
+                packet pkt;
+                pkt.seqno = (seqno);
+                pkt.len = (chunkSize+8);
+                pkt.chsum = 88;
+                pkt.finished = 88;
+                memcpy(pkt.data, fileContent.data() + seqno * chunkSize, chunkSize);
+                if(seqno == fileSize / chunkSize - 1 && fileSize % chunkSize == 0)
+                    pkt.finished = 1;
+                /**
+                 * The real business starts*/
+                ssize_t b = sendto(newSock, &pkt, pkt.len, 0,
+                                   &clntAddr, clntAddrLen);
+                if(b < 0)
+                    perror("sendto() failed");
+                ack_packet receivedPacket{};
+                ssize_t received = recvfrom(newSock, (void*)&receivedPacket, 6,
+                         MSG_WAITALL,
+                         &clntAddr,
+                                 &clntAddrLen);
+                if(received == -1){
+                    if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                        // Timeout occurred
+                        std::cerr << "Timeout occurred during receive" << std::endl;
+                        seqno--;
+                        continue;
+                    } else {
+                        std::cerr << "Error in sendto: " << strerror(errno) << std::endl;
+                    }
+                }
+                if((receivedPacket.ackno) != seqno){
+                    cout << "EEEEEEE" << endl;
+                    cout << receivedPacket.ackno << " " << seqno << endl;
+                    exit(-1);
+                    seqno--;
+                }
+            }
+            size_t lastChunkSize = fileSize % chunkSize;
+            if (lastChunkSize > 0) {
+                packet pkt;
+                pkt.seqno = fileSize / chunkSize; // Finished
+                pkt.len = (lastChunkSize+8);
+                memcpy(pkt.data, fileContent.data() + fileSize / chunkSize * chunkSize, lastChunkSize);
+                pkt.chsum = 0;
+                pkt.finished = 1;
+                ssize_t b = sendto(newSock, &pkt, 508, 0,
+                                   &clntAddr, clntAddrLen);
+                ack_packet receivedPacket{};
+                recvfrom(newSock, (void*)&receivedPacket, 6, MSG_WAITALL,
+                          &clntAddr, &clntAddrLen);
+                cout << "Acknowledged message " << receivedPacket.ackno << endl;
+            }
+            cout << fileSize/chunkSize << endl;
+            exit(EXIT_SUCCESS);
+        } else {
+            int status;
+            pid_t terminatedChildPid = waitpid(pid, &status, 0);
+
+            if (terminatedChildPid == -1) {
+                // Handle waitpid error
+                perror("waitpid");
+                return 1;
+            }
+
+            if (WIFEXITED(status)) {
+                std::cout << "Child process (PID: " << terminatedChildPid << ") exited with status: " << WEXITSTATUS(status) << std::endl;
+            } else {
+                std::cerr << "Child process did not exit normally." << std::endl;
+                return 1;
+            }
+
+            std::cout << "Parent process is done." << std::endl;
+
+        }
+    }
+
+    // NOT REACHED
+}
+
+.............................
+
+Client:
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <fstream>
+#include <iostream>
+#include <chrono>
+#include <thread>
+
+using namespace std;
+void DieWithUserMessage(const char *msg, const char *detail){
+    fputs(msg, stderr);
+    fputs(": ", stderr);
+    fputs(detail, stderr);
+    fputc('\n', stderr);
+    exit(1);
+}
+void DieWithSystemMessage(const char *msg){
+    perror(msg);
+    exit(1);
+}
+struct packet {
+    uint16_t chsum;
+    uint16_t len;
+    uint16_t seqno;
+    uint16_t finished;
+    char data[500];
+};
+struct ack_packet {
+    uint16_t chsum;
+    uint16_t len;
+    uint16_t ackno;
+};
+
+int main(int argc, char *argv[]) {
+
+    if (argc != 2) // Test for correct number of arguments
+        DieWithUserMessage("Parameter(s)",
+                           "<Server Address/Name> <Input File Address>");
+
+    const char* inputFileName = argv[1];
+    std::ifstream inputFile(inputFileName);
+    if (!inputFile.is_open()) {
+        DieWithUserMessage("Wrong File",
+                           "FIle Doesn't Exist");
+    }
+    char line1[256], line2[256], fileName[256];
+    inputFile.getline(line1, sizeof(line1));
+    inputFile.getline(line2, sizeof(line2));
+    inputFile.getline(fileName, sizeof(fileName));
+
+    inputFile.close();
+    size_t length1 = strlen(line1);
+    if (length1 > 0 && line1[length1 - 1] == '\n') {
+        line1[length1 - 1] = '\0';
+    }
+
+    size_t length2 = strlen(line2);
+    if (length2 > 0 && line2[length2 - 1] == '\n') {
+        line2[length2 - 1] = '\0';
+    }
+
+    size_t length3 = strlen(fileName);
+    if (length3 > 0 && fileName[length3 - 1] == '\n') {
+        fileName[length3 - 1] = '\0';
+    }
+
+    char *server = line1;
+    char *servPort = line2;
+    struct addrinfo addrCriteria;
+    memset(&addrCriteria, 0, sizeof(addrCriteria));
+    addrCriteria.ai_family = AF_INET;
+    addrCriteria.ai_socktype = SOCK_DGRAM;
+    addrCriteria.ai_protocol = IPPROTO_UDP;
+    struct addrinfo *servAddr;
+    /**
+     * The client here is trying to reach the server
+     * through the system call getaddinfo*/
+    int rtnVal = getaddrinfo(server, servPort, &addrCriteria, &servAddr);
+    if (rtnVal != 0)
+        DieWithUserMessage("getaddrinfo() failed", gai_strerror(rtnVal));
+    int sock = socket(servAddr->ai_family, servAddr->ai_socktype,
+                      servAddr->ai_protocol); // Socket descriptor for client
+    if (sock < 0)
+        DieWithSystemMessage("socket() failed");
+
+    ssize_t numBytes = sendto(sock, fileName, strlen(fileName), 0,
+                                  servAddr->ai_addr, servAddr->ai_addrlen);
+    ofstream outputFile(fileName, ios::binary);
+    while (numBytes == -1){
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            // Timeout occurred
+            std::cerr << "Timeout occurred during sendto" << std::endl;
+        } else {
+            std::cerr << "Error in sendto: " << strerror(errno) << std::endl;
+        }
+        numBytes = sendto(sock, fileName, strlen(fileName), 0,
+                          servAddr->ai_addr, servAddr->ai_addrlen);
+    }
+    int s = 0;
+    struct sockaddr temp{};
+    socklen_t sz;
+    uint16_t waiting_for_package_x = 0;
+    int i = 0;
+    while(true){
+        i++;
+        packet receivedPacket{};
+        numBytes = recvfrom(sock, (void*)&receivedPacket, 508, MSG_WAITALL,
+                            &temp, &sz);
+        if(i == 1)
+            continue;
+        if(numBytes < 8){
+            if (numBytes < 0)
+                DieWithSystemMessage("recvfrom() failed");
+            cout << "Alan is right" << endl;
+            exit(-1);
+        }
+        s+=numBytes-8;
+        if(receivedPacket.seqno != waiting_for_package_x){
+            cout << receivedPacket.seqno << " " << waiting_for_package_x << endl;
+            exit(-1);
+        }
+        waiting_for_package_x++;
+        outputFile.write(receivedPacket.data, receivedPacket.len-8);
+        ack_packet ackPacket{};
+        ackPacket.chsum= (0);
+        ackPacket.ackno= (receivedPacket.seqno);
+        ackPacket.len = (6);
+        sendto(sock, &ackPacket, 6,
+                   0, &temp, sz);
+        if(receivedPacket.finished == 1)
+            break;
+    }
+    cout << i << " iterations" << endl;
+    cout << "Real size is " << s << endl;
+    outputFile.close();
+    close(sock);
+    exit(0);
+}
+
+
+

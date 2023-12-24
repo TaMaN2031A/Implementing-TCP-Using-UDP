@@ -1,0 +1,3 @@
+/home/eyad/CLionProjects/UDPServer/cmake-build-debug/CMakeFiles/UDPServer.dir
+/home/eyad/CLionProjects/UDPServer/cmake-build-debug/CMakeFiles/edit_cache.dir
+/home/eyad/CLionProjects/UDPServer/cmake-build-debug/CMakeFiles/rebuild_cache.dir
