@@ -32,7 +32,7 @@ void DieWithSystemMessage(const char *msg) {
     perror(msg);
     exit(1);
 }
-// "Esbero, Wa Sabero, Wa Ittaqo Allah la'alkom tofle7on"
+// "Esbero, Wa Sabero, Wa rabeto, Wa Ittaqo Allah la'alkom tofle7on"
 pck_queue minQueue;
 pck_queue tempQueue;
 int total_buffer_size = 2 * (1e5);
