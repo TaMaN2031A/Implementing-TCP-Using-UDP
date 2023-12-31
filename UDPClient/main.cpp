@@ -44,7 +44,7 @@ struct packet {
         return seqno > other.seqno;
     }
 };
-// "Wa la Yasonnoka A'an A'ayat ElLah ba'd Eth Onzelat Elayk
+// "Wa la Yasodonnoka A'an A'ayat ElLah ba'd Eth Onzelat Elayk
 // Wa Ed'oo Ela Rabek
 // Wa la takonan men Al moshreken"
 int total_buffer_size = 2*(1e5);
