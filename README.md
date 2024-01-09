@@ -16,5 +16,3 @@ g++ main.cpp Formatter.cpp Formatter.h -o udp_server  .
 
 Brief Explanation of the code and the analysis part:
 https://drive.google.com/file/d/1ctNUJeT3rV9i_RGSVQ0WSyYFVjfrFL8T/view?usp=sharing
-
-فَلَمَّا اعْتَزَلَهُمْ وَمَا يَعْبُدُونَ مِن دُونِ اللَّهِ وَهَبْنَا لَهُ إِسْحَاقَ وَيَعْقُوبَ ۖ وَكُلًّا جَعَلْنَا نَبِيًّا (49)
